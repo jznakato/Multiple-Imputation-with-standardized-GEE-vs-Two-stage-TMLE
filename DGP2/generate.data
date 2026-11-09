@@ -1,0 +1,202 @@
+get_full_data <- function(dgp, J = 50, N_mean = 200, N_sd = 10,  b0 = 0.01, bA = 0.6,verbose = FALSE) {
+  
+  N_j <- round(rnorm(J, N_mean, N_sd))
+  
+  full_data <- NULL
+  for (j in 1:J) {
+    full_data <- rbind(full_data, generate_cluster(dgp, N = N_j[j], j = j,  verbose,b0 = b0, bA = bA))
+  }
+  
+  # randomize at cluster level
+  X <- data.frame(id = 1:J, A = sample(c(rep(1, J/2), rep(0, J/2))))
+  full_data$A <- X$A[match(full_data$id, X$id)]
+  
+  # observed Delta1 and Y1
+  full_data$Delta <- ifelse(full_data$A == 1, full_data$Delta_1, full_data$Delta_0)
+  
+  full_data$Y1 <- ifelse(full_data$Delta == 1, full_data$Y1_star, NA_real_)
+  
+  full_data$L <- ifelse(full_data$Delta == 1,
+                        ifelse(full_data$A == 1, full_data$L_1, full_data$L_0),
+                        NA_real_)
+  # observed Y2_star (factual underlying outcome)
+  full_data$Y2_star <- ifelse(full_data$A == 1, full_data$Y2star_1, full_data$Y2star_0)
+  
+  # observed Delta2
+  full_data$Delta2  <- ifelse(full_data$A == 1, full_data$Delta2_1, full_data$Delta2_0)
+                                                 Y2_star))
+  full_data$Y2 <- with(full_data,
+                       ifelse(Delta == 0,                  NA_real_,        # off-rule at stage 1 — value ignored
+                              ifelse(Y1 == 0 & Delta==1,                     0,               # Y1=0 (screened): deterministic 0 under rule
+                                     ifelse(Delta2 == 1,                 Y2_star,         # Y1=1 and measured
+                                            NA_real_)))      # Y1=1 and unmeasured: true missingness
+                       
+  )
+  
+  full_data
+}
+
+
+
+
+
+generate_cluster <- function(dgp, N, j, verbose, b0 = 0.01, bA = 0.6) {
+  
+  UE1 <- rep(runif(1, -1, 1), N)
+  UE2 <- rep(runif(1, -1, 1), N)
+  E1  <- rep(rnorm(1, UE1, 0.5), N)
+  E2  <- rep(rnorm(1, UE2, 0.5), N)
+  
+  W1 <- rnorm(N, 0.3 * E1, 0.5)
+  W2 <- rnorm(N, 0.2 * E2, 0.5)
+  W3 <- rbinom(N, 1, plogis(0.3 * E1 - 0.2 * E2))
+  
+  # Y1_star — focus population indicator (unchanged; no L here per your spec)
+  UY1_star <- runif(N, 0, 1)
+  pY1_star <- plogis(0.5 + W1 + W2 - W3 + 0.25*E1 + 0.25*E2)
+  Y1_star  <- as.numeric(UY1_star < pY1_star)
+  
+  # Delta1 — screening (unchanged)
+  UDelta <- runif(N, 0, 1)
+  Delta_1 <- get_delta(dgp, A=1, E1, E2, W1, W2, W3, UE1, UE2, UDelta,b0 = b0, bA = bA)
+  Delta_0 <- get_delta(dgp, A=0, E1, E2, W1, W2, W3, UE1, UE2, UDelta,b0 = b0, bA = bA)
+  
+  # NEW: L_a under each treatment arm
+  UL <- runif(N, 0, 1)
+  L_1 <- get_L(dgp, A=1, E1, E2, W1, W2, W3, Y1_star=Y1_star, UE1, UE2, UL)
+  L_0 <- get_L(dgp, A=0, E1, E2, W1, W2, W3, Y1_star=Y1_star, UE1, UE2, UL)
+  
+  # NEW: Y2_star_a under each arm, with the corresponding L_a
+  UY2 <- runif(N, 0, 1)
+  Y2star_1 <- get_Y2_star(dgp, A = 1, W1, W2, W3, E1, E2, UE1, UE2,
+                          L = L_1, Y1_star = Y1_star,  UY2 = UY2)
+  Y2star_0 <- get_Y2_star(dgp, A = 0, W1, W2, W3, E1, E2, UE1, UE2,
+                          L = L_0, Y1_star = Y1_star,  UY2 = UY2)
+
+  
+  
+  Delta2_1 <- get_delta2(dgp, A=1, W1, W2, W3, E1, E2, UE1, UE2,
+                         L=L_1, Y1_obs=Delta_1 * Y1_star, Delta=Delta_1, UDelta2=UDelta2)
+  Delta2_0 <- get_delta2(dgp, A=0, W1, W2, W3, E1, E2, UE1, UE2,
+                         L=L_0, Y1_obs=Delta_0 * Y1_star, Delta=Delta_0, UDelta2=UDelta2)
+  
+  data.frame(
+    id      = j,
+    n       = N,
+    E1 = E1, E2 = E2,
+    W1 = W1, W2 = W2, W3 = W3,
+    Delta_1 = Delta_1,   Delta_0 = Delta_0,
+    L_1     = L_1,       L_0     = L_0,
+    Y1_star = Y1_star,
+    Y2star_1 = Y2star_1, Y2star_0 = Y2star_0,
+    Delta2_1 = Delta2_1, Delta2_0 = Delta2_0
+  )
+}
+
+
+
+get_L <- function(dgp, A, E1, E2, W1, W2, W3, Y1_star, UE1, UE2, UL, verbose = FALSE) {
+  if (dgp == "main") {
+    pL <- plogis(-0.5 + 0.8*A + 0.5*Y1_star + 0.3*W1 - 0.2*W2 + 0.4*W3 + 0.2*E1 + 0.1*UE1)
+  } else {
+    pL <- plogis(-0.5 + 0.8*A + 0.5*Y1_star + 0.3*W1 - 0.2*W2 + 0.4*W3 + 0.2*E1 + 0.1*UE1)
+  }
+  if (verbose) { print(summary(pL)); hist(pL) }
+  as.numeric(UL < pL)
+}
+
+
+get_Y2_star <- function(dgp, A, W1, W2, W3, E1, E2, UE1, UE2, L,
+                        Y1_star, UY2, verbose = FALSE) {
+  
+  if (dgp == "main") {
+    pY2 <- plogis(0.2 + 0.1*A + 2*L +   1.6*L*A+ 1*W1 + 0.5*W2 + 0.6*W3 - 0.2*E1 + 0.2*E2)
+  } else {
+    pY2 <- plogis(0.2  + 2*L + 1*W1 + 0.5*W2 + 0.6*W3 -0.2*E1 + 0.2*E2)
+  }
+  if (verbose) { print(summary(pY2)); hist(pY2) }
+
+  ifelse(Y1_star == 1, as.numeric(UY2 < pY2), 0)
+}
+
+
+
+## added Y_obs to affect delta2
+get_delta2 <- function(dgp, A, W1, W2, W3, E1, E2, UE1, UE2, L,
+                       Y1_obs, Delta, UDelta2, verbose = FALSE) {
+  if (dgp == "main") {
+    pDelta2 <- plogis(1.2 + 0.3*A - 0.8*L + 0.6*Y1_obs + 0.2*W1 - 0.1*W2 + 0.1*UE1 + 0.1*UE2)
+  } else {
+    pDelta2 <- plogis(1.2 - 0.8*L + 0.6*Y1_obs + 0.2*W1 - 0.1*W2 + 0.1*UE1 + 0.1*UE2)
+  }
+  if (verbose) { print(summary(pDelta2)); hist(pDelta2) }
+  Delta * as.numeric(UDelta2 < pDelta2)
+}
+
+
+get_truth <- function(dgp, J, N_mean = 200, N_sd = 10, verbose = FALSE) {
+  
+  full_data <- get_full_data(dgp, J = J, N_mean = N_mean, N_sd = N_sd)
+  
+  Yc_1 <- Yc_0 <- rep(NA, J)
+  for (j in 1:J) {
+    temp <- full_data[full_data$id == j & full_data$Y1_star == 1, ]
+    Yc_1[j] <- mean(temp$Y2star_1)
+    Yc_0[j] <- mean(temp$Y2star_0)
+  }
+  
+  i1 <- mean(full_data$Y2star_1) / mean(full_data$Y1_star)
+  i0 <- mean(full_data$Y2star_0) / mean(full_data$Y1_star)
+  
+  EYc_1 <- mean(Yc_1)
+  EYc_0 <- mean(Yc_0)
+  
+  data.frame(
+    int.ind   = i1,         con.ind   = i0,
+    RD.ind    = i1 - i0,    RR.ind    = i1 / i0,
+    int.clust = EYc_1,      con.clust = EYc_0,
+    RD.clust  = EYc_1 - EYc_0, RR.clust = EYc_1 / EYc_0,
+    k0 = sd(Yc_0) / mean(Yc_0),
+    k1 = sd(Yc_1) / mean(Yc_1)
+  )
+}
+
+
+# =====================================================================
+# Delta1 — screening indicator 
+# =====================================================================
+get_delta <- function(dgp, A, E1, E2, W1, W2, W3, UE1, UE2, UDelta,b0 = 0.01,  
+                      bA = 0.6,
+                      verbose = FALSE) {
+  
+  if (dgp == "main") {
+    pscore_delta <- plogis(
+    b0 + bA*A + 0.5*W1 + 0.4*W2 -
+        0.4*A*W3 + 0.4*(1-A)*W3 + 0.1*UE1 + 0.1*UE2
+    )
+  } else {
+    # null: drop A's effect on screening
+    pscore_delta <- plogis(
+      b0 + 0.5*W1 + 0.4*W2 + 0.1*UE1 + 0.1*UE2
+    )
+  }
+  
+  if (verbose) { print(summary(pscore_delta)); hist(pscore_delta) }
+  as.numeric(UDelta < pscore_delta)
+}
+
+gen_data_until_valid <- function(dgp, J, N_mean, N_sd,
+                                 min_obs = 5, max_tries = 100, verbose = FALSE,b0 = 0.01, bA = 0.6) {
+  for (b in 1:max_tries) {
+    O   <- get_full_data(dgp, J = J, N_mean = N_mean, N_sd = N_sd, verbose = FALSE,b0 = b0, bA = bA)
+    tab <- aggregate(cbind(observed_Y2 = !is.na(O$Y2) & O$Y1 == 1) ~ id,
+                     data = O, FUN = sum)
+    if (all(tab$observed_Y2 >= min_obs)) {
+      attr(O,"n_tries")<-b
+      return(O)
+    } 
+  }
+  stop("Could not generate a dataset with enough observed Y2 per cluster.")
+}
+
+
